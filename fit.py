@@ -131,4 +131,11 @@ for c3 in range(3):
     prof[:, c3] = np.interp(np.arange(len(dedges)), np.flatnonzero(good), prof[good, c3])
 print('water by distance (m):', {int(d): tuple(c.round().astype(int)) for d, c in zip(dedges[::4], prof[::4])})
 model.update(dedges=dedges, water_profile=prof)
+
+# the open ocean isn't flat: it has a faint blotchy texture, a couple of shades either way, measured out in the Gulf
+gb = tuple(int(v * 2 ** (z - 9)) for v in (124, 131, 216, 222))
+gimg, ghave = artwork(z, *gb)
+gulf = gimg - np.stack([ndimage.gaussian_filter(gimg[..., c3], 48) for c3 in range(3)], -1)
+model['ocean_texture'] = gulf[ghave].std(axis=0)
+print('ocean texture:', model['ocean_texture'].round(2))
 np.savez(f'{HERE}/model_z{z}.npz', **model)

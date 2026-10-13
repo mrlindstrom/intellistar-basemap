@@ -1,4 +1,4 @@
-import os, math, urllib.request
+import os, math, time, urllib.request
 import numpy as np
 from PIL import Image
 
@@ -20,9 +20,18 @@ def terrarium(z, x, y):
     if not os.path.exists(p):
         os.makedirs(os.path.dirname(p), exist_ok=True)
         url = f'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'
-        data = urllib.request.urlopen(url, timeout=60).read()
-        with open(p, 'wb') as f:
+        #a dropped connection is retried a few times, waiting longer each time
+        for attempt in range(6):
+            try:
+                data = urllib.request.urlopen(url, timeout=60).read()
+                break
+            except OSError:
+                if attempt == 5:
+                    raise
+                time.sleep(2 * 2 ** attempt)
+        with open(p + '.part', 'wb') as f:
             f.write(data)
+        os.replace(p + '.part', p)
     a = np.asarray(Image.open(p).convert('RGB')).astype(np.float64)
     return a[..., 0] * 256 + a[..., 1] + a[..., 2] / 256 - 32768
 

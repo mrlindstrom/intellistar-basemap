@@ -1,6 +1,6 @@
 # paints IntelliStar-style tiles for an area at zoom 9 into tiles/generated, from OpenStreetMap shorelines and lakes
 # (sources.py) and open elevation data (downloaded as needed into cache/terrarium), colored by model_z9.npz
-#   python generate.py <region> [<region> ...]     regions: alaska, aleutians (Alaska west of the 180th meridian), hawaii
+#   python generate.py <region> [<region> ...]     regions: see REGIONS, or all
 # run again to resume: areas whose tiles are all there are skipped
 import sys, os, math, time
 from concurrent.futures import ThreadPoolExecutor
@@ -11,12 +11,20 @@ from PIL import Image, ImageDraw
 from common import *
 
 Z = 9
+#each with open ocean around it, so maps centered there aren't cut off
 REGIONS = {
-    # west, south, east, north, lakes folder in cache/sources
-    'alaska': (-180.0, 50.5, -125.0, 72.0, 'ak'),
-    'aleutians': (172.0, 50.5, 180.0, 54.0, 'ak'),
-    'hawaii': (-165.0, 15.5, -150.5, 25.5, 'hi'),  # with open ocean around it, so maps centered there aren't cut off
+    # west, south, east, north, lakes folders in cache/sources
+    'alaska': (-180.0, 50.5, -125.0, 72.0, ['ak']),
+    'aleutians': (172.0, 50.5, 180.0, 54.0, ['ak']),  # Alaska west of the 180th meridian
+    'hawaii': (-165.0, 15.5, -150.5, 25.5, ['hi']),
+    # the original artwork has these islands but stops just south of them
+    'puerto-rico': (-68.5, 12.5, -63.5, 20.5, ['pr', 'vi']),
+    'guam': (143.0, 11.5, 147.5, 21.0, ['oceania']),  # and the Northern Mariana Islands
+    'american-samoa': (-172.5, -16.0, -167.5, -10.0, ['oceania']),
 }
+#land Natural Earth puts in these gets the brighter US colors (the original paints Puerto Rico that way);
+#the rest gets the darker colors the original uses outside the US
+US = ('USA', 'PRI', 'VIR', 'GUM', 'MNP', 'ASM', 'UMI')
 CHUNK = 8  # tiles per side painted together (plus a tile of margin all around, for shading and the coastal glow)
 SS = 2  # supersampling for smooth edges
 BIG_LAKE_M2 = 4e8  # lakes this big are painted like the ocean, as the Great Lakes are
@@ -119,21 +127,55 @@ def ring_area_m2(ring):
     return abs(0.5 * np.sum(x[:-1] * yy[1:] - x[1:] * yy[:-1])) * mpp ** 2
 
 
+def value_noise(x0, y0, w, h, cell, seed):
+    """smooth random values, -1..1, at world px; the same everywhere a window lands, so areas join without seams"""
+    wrap = world // cell
+    xs, ys = (np.arange(w) + x0) / cell, (np.arange(h) + y0) / cell
+    ix, iy = np.floor(xs).astype(np.int64), np.floor(ys).astype(np.int64)
+    fx, fy = xs - ix, ys - iy
+    fx, fy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
+
+    def corner(cx, cy):
+        hsh = ((cx[None, :] % wrap) * 73856093) ^ (cy[:, None] * 19349663) ^ (seed * 83492791)
+        hsh = (hsh ^ (hsh >> 13)) * 1274126177 & 0xFFFFFFFF
+        return (hsh ^ (hsh >> 16)) % 2048 / 1023.5 - 1
+
+    top = corner(ix, iy) * (1 - fx) + corner(ix + 1, iy) * fx
+    bottom = corner(ix, iy + 1) * (1 - fx) + corner(ix + 1, iy + 1) * fx
+    return top * (1 - fy[:, None]) + bottom * fy[:, None]
+
+
+#the ocean's blotches show at every size from a few pixels to a few dozen, so a few sizes of noise are added up,
+#each made the same strength, then scaled to the texture measured in the original
+OCEAN_CELLS = (2, 8, 32)
+_scale = [value_noise(0, 0, 512, 512, c, i).std() for i, c in enumerate(OCEAN_CELLS)]
+
+
+def ocean_texture(x0, y0, w, h):
+    n = sum(value_noise(x0, y0, w, h, c, i) / s for i, (c, s) in enumerate(zip(OCEAN_CELLS, _scale)))
+    return (n / math.sqrt(len(OCEAN_CELLS)))[..., None] * m['ocean_texture']
+
+
 def tile_path(x, y):
     return os.path.join(GENERATED, str(Z), str(x), f'{y}.png')
 
 
 def run(name):
-    west, south, east, north, lakes_dir = REGIONS[name]
+    west, south, east, north, lake_dirs = REGIONS[name]
     tx0, tx1, ty0, ty1 = tx(west), min(tx(east - 1e-9), 2 ** Z - 1), ty(north), ty(south)
     print(f'{name}: z{Z} tiles x {tx0}-{tx1}, y {ty0}-{ty1} ({(tx1 - tx0 + 1) * (ty1 - ty0 + 1)} tiles)')
 
     bbox = [west - 0.5, south - 0.5, east + 0.5, north + 0.5]
     land, _ = load(os.path.join(SOURCES, 'land', 'land_polygons.shp'), bbox)
-    lakes, _ = load(os.path.join(SOURCES, lakes_dir, 'gis_osm_water_a_free_1.shp'), bbox,
-                    lambda rec: rec['fclass'] in ('water', 'reservoir', 'riverbank'))
+    lakes = Layer()
+    for d in lake_dirs:
+        part, _ = load(os.path.join(SOURCES, d, 'gis_osm_water_a_free_1.shp'), bbox,
+                       lambda rec: rec['fclass'] in ('water', 'reservoir', 'riverbank'))
+        lakes.rings += part.rings
+        lakes.boxes += [tuple(b) for b in part.boxes]
+    lakes.done()
     countries, crec = load(os.path.join(SOURCES, 'countries', 'ne_10m_admin_0_countries.shp'), bbox)
-    foreign = np.array([rec['ADM0_A3'] != 'USA' for rec in crec], bool)
+    foreign = np.array([rec['ADM0_A3'] not in US for rec in crec], bool)
     big = np.array([max((ring_area_m2(r) for r, hole in rings if not hole), default=0) >= BIG_LAKE_M2
                     for rings in lakes.rings], bool)
     print(f'  {big.sum()} lakes big enough to paint like the ocean')
@@ -147,8 +189,9 @@ def run(name):
         mpp = meters_per_px(Z, tile_lat((cy0 + cy1 + 1) / 2, Z))
         tiles = [(x, y) for x in range(cx0, cx1 + 1) for y in range(cy0, cy1 + 1)]
         if landc.max() == 0:
-            rgb = np.broadcast_to(np.round(far_water).astype(np.uint8), (256, 256, 3))
-            return [(x, y, rgb) for x, y in tiles]
+            rgb = np.clip(np.round(far_water + ocean_texture(wx0, wy0, w, h)), 0, 255).astype(np.uint8)
+            return [(x, y, rgb[(y - cy0 + pad) * 256:(y - cy0 + pad + 1) * 256, (x - cx0 + pad) * 256:(x - cx0 + pad + 1) * 256])
+                    for x, y in tiles]
         # elevation for the area, fetched 16 at a time
         jobs = [(x % 2 ** Z, y) for x in range(cx0 - pad, cx1 + pad + 1) for y in range(cy0 - pad, cy1 + pad + 1) if 0 <= y < 2 ** Z]
         with ThreadPoolExecutor(16) as ex:
@@ -175,7 +218,7 @@ def run(name):
 
         # water by distance from shore: the lighter glow along the coast fading out to the deep ocean color
         dist = ndimage.distance_transform_edt(~(landc > 0.5)) * mpp
-        water_rgb = np.stack([np.interp(dist, m['dedges'], profile[:, k]) for k in range(3)], -1)
+        water_rgb = np.stack([np.interp(dist, m['dedges'], profile[:, k]) for k in range(3)], -1) + ocean_texture(wx0, wy0, w, h)
         a = landc[..., None]
         rgb = land_rgb * a + water_rgb * (1 - a)
         s = smallc[..., None]
@@ -199,7 +242,7 @@ def run(name):
     print(f'{name}: done')
 
 
-names = sys.argv[1:]
+names = list(REGIONS) if sys.argv[1:] == ['all'] else sys.argv[1:]
 if not names or any(n not in REGIONS for n in names):
     sys.exit('usage: python generate.py <region> [<region> ...]   regions: ' + ', '.join(REGIONS))
 for n in names:

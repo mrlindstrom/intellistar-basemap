@@ -3,7 +3,7 @@
 Tools for the IntelliStar basemap artwork that the [Weatherscan v2](https://github.com/mrlindstrom/weatherscan-v2) simulator's `intellistar` map look draws:
 
 - **Archive** the artwork from its Mapbox tileset to plain tile files, while that tileset is still online.
-- **Generate** matching artwork for Alaska and Hawaii, which the tileset never covered. The tiles are painted from open elevation data and OpenStreetMap shorelines and lakes, in colors learned from the original artwork.
+- **Generate** matching artwork for Alaska, Hawaii and the US territories, which the tileset never covered (or, for Puerto Rico and the Virgin Islands, cuts off just south of). The tiles are painted from open elevation data and OpenStreetMap shorelines and lakes, in colors learned from the original artwork.
 - **Merge** the two into one tile folder that the simulator can load in place of the online tileset.
 
 No tiles are included here, only the tools and the fitted color model (`model_z9.npz`).
@@ -37,10 +37,10 @@ Each tile is one request on your Mapbox token. Mapbox's free allowance has cover
 python sources.py
 ```
 
-This downloads about 1.4 GB into `cache/sources`:
+This downloads about 1.6 GB into `cache/sources`:
 
 - OpenStreetMap land polygons, which give the shorelines;
-- the OpenStreetMap lakes and rivers for Alaska and Hawaii;
+- the OpenStreetMap lakes and rivers for Alaska, Hawaii, Puerto Rico, the US Virgin Islands, and Guam, the Northern Mariana Islands and American Samoa;
 - Natural Earth's country borders.
 
 Elevation tiles are downloaded later, as each area is painted.
@@ -48,14 +48,21 @@ Elevation tiles are downloaded later, as each area is painted.
 ### 3. Paint Alaska and Hawaii
 
 ```
-python generate.py alaska aleutians hawaii
+python generate.py all
 ```
 
-This writes zoom 9 tiles to `tiles/generated`.
-- `aleutians` is the part of Alaska west of the 180th meridian.
-- Hawaii includes open ocean around the islands, so maps centered there aren't cut off.
+This writes zoom 9 tiles to `tiles/generated`. You can also name regions instead of `all`:
 
-Alaska is about 5,400 tiles and takes 10–15 minutes, plus a few hundred MB of elevation data. If it stops partway, run it again and it skips what's already done.
+| Region | Covers |
+|---|---|
+| `alaska` | Alaska east of the 180th meridian, with the Yukon and northern British Columbia beside it |
+| `aleutians` | The part of Alaska west of the 180th meridian |
+| `hawaii` | The main Hawaiian islands |
+| `puerto-rico` | Puerto Rico and the US Virgin Islands. The original artwork has these, but stops just south of them. |
+| `guam` | Guam and the Northern Mariana Islands |
+| `american-samoa` | American Samoa |
+
+Each region includes open ocean around it, so maps centered there aren't cut off. Alaska is most of the work: about 5,400 tiles, 10–15 minutes and a few hundred MB of elevation data. If it stops partway, run it again and it skips what's already done.
 
 ### 4. Build the other zooms and merge
 
@@ -91,21 +98,21 @@ Then restart the simulator's server. The `intellistar` look now draws its artwor
 `fit.py` compares the archived US artwork with elevation data for the same places, and saves what it learns in `model_z9.npz`:
 
 - **Land colors:** a color for each pairing of elevation and terrain shading, for US land and for the darker land outside the US. The light comes from the west.
-- **The ocean:** its color by distance from shore, from a lighter blue at the shore to the deep navy beyond about 15 km.
+- **The ocean:** its color by distance from shore, from a lighter blue at the shore to the deep navy beyond about 15 km, and the faint blotchy texture of its open water.
 - **Lakes:** the lighter blue of small lakes. Lakes over about 400 km², like Iliamna, are painted like the ocean, as the Great Lakes are in the original.
 
 `generate.py` then paints each area:
 
 - shorelines and lakes from OpenStreetMap;
 - elevation and shading from the open terrain tiles, colored by the model;
-- the darker tint for land that Natural Earth puts outside the US;
-- a little fine grain, like the original's texture.
+- the darker tint for land that Natural Earth puts outside the US and its territories (the original paints Puerto Rico in the US colors);
+- a little fine grain on the land, and the ocean's blotches, like the original's texture.
 
 You only need to run `fit.py` again to refit the model, and that requires `tiles/archive`.
 
 ## Limits
 
-- Only the areas in `generate.py`'s `REGIONS` are painted. Northern Canada east of 125°W, and everything beyond North America, stays blank.
+- Only the areas in `generate.py`'s `REGIONS` are painted. Northern Canada east of 125°W, and the rest of the world, stays blank. So do the small US Minor Outlying Islands, such as Midway and Wake.
 - Glaciers and icefields are painted by elevation like any other land, because the original artwork has nothing to copy for ice.
 - Where the original artwork stops, at 53°N on the British Columbia coast, its tint and the generated tint meet at a faint edge.
 - The generated tiles are look-alikes, not recovered originals. Keep the archive and generated folders separate.
