@@ -1,0 +1,4 @@
+numpy
+scipy
+pillow
+pyshp>=2.2

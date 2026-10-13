@@ -1,0 +1,4 @@
+tiles/
+cache/
+__pycache__/
+*.png
