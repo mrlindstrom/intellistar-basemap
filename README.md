@@ -41,11 +41,17 @@ This downloads about 1.6 GB into `cache/sources`:
 
 - OpenStreetMap land polygons, which give the shorelines;
 - the OpenStreetMap lakes and rivers for Alaska, Hawaii, Puerto Rico, the US Virgin Islands, and Guam, the Northern Mariana Islands and American Samoa;
-- Natural Earth's country borders.
+- Natural Earth's country borders, and its world lakes.
 
 Elevation tiles are downloaded later, as each area is painted.
 
-### 3. Paint Alaska and Hawaii
+To paint other countries (see [Other countries](#other-countries)), add their lakes and rivers too:
+
+```
+python sources.py --country France --country Belgium
+```
+
+### 3. Paint Alaska, Hawaii and the territories
 
 ```
 python generate.py all
@@ -93,6 +99,39 @@ In the simulator's `yourConfig.json`, set the folder under `appearanceSettings`:
 
 Then restart the simulator's server. The `intellistar` look now draws its artwork from that folder, and a blank `intellistarTiles` goes back to the online tileset.
 
+## Other countries
+
+The original artwork paints the US in brighter colors and everything outside it, like Canada and Mexico, darker. `generate.py` can paint any country in those brighter "home" colors instead, with every other country dark:
+
+```
+python sources.py --country France --country Belgium
+python generate.py --country France --country Belgium
+python pyramid.py --no-archive
+```
+
+**Naming countries:** use the country's name (`France`, `"United Kingdom"`) or its three-letter code (`FRA`, `GBR`), as Natural Earth lists them.
+
+**Which areas get painted:** each country's land and the sea around it, out to 1.5°. Far-off islands, like France's overseas regions, become separate small areas rather than one huge box.
+
+**Home colors:**
+- Every `--country` is a home country.
+- To choose the home countries separately, use `--home FRA,BEL`. For example, `python generate.py --country Belgium --home FRA,BEL` paints the area around Belgium with both countries in the home colors.
+- Without `--country` or `--home`, the home colors go to the US and its territories, as in the original.
+
+**Lakes:** `sources.py --country` downloads each country's OpenStreetMap lakes and rivers from [Geofabrik](https://download.geofabrik.de/). Big countries come in regional pieces and can run to several GB. Neighboring countries, and any country Geofabrik doesn't cover, get Natural Earth's lakes, which only include the larger ones.
+
+**Keep the original out:** `--no-archive` builds `tiles/merged` from the generated tiles alone. Otherwise the original artwork, which paints Canada, Mexico and the Caribbean dark, would cover any of them you made a home country. Leave it off when you're adding to the US set.
+
+**Use a separate folder for each set of home countries.** `generate.py` skips tiles that already exist, so tiles painted with one set of home countries would otherwise stay mixed in with the next. For example:
+
+```
+set INTELLISTAR_TILES=D:\intellistar-france
+```
+
+on Windows, or `export INTELLISTAR_TILES=...` elsewhere, before running the steps.
+
+Big countries take a while. `generate.py` prints how many zoom 9 tiles it's about to paint: Alaska's 5,400 took 10–15 minutes. France is about 960, of which 730 are the mainland and Corsica and the rest its overseas regions, and Germany is about 470.
+
 ## How the painting works
 
 `fit.py` compares the archived US artwork with elevation data for the same places, and saves what it learns in `model_z9.npz`:
@@ -112,7 +151,8 @@ You only need to run `fit.py` again to refit the model, and that requires `tiles
 
 ## Limits
 
-- Only the areas in `generate.py`'s `REGIONS` are painted. Northern Canada east of 125°W, and the rest of the world, stays blank. So do the small US Minor Outlying Islands, such as Midway and Wake.
+- Only the areas you ask for are painted: `REGIONS` in `generate.py`, or the `--country` ones. Northern Canada east of 125°W, and the rest of the world, stays blank. So do the small US Minor Outlying Islands, such as Midway and Wake.
+- The colors come from North American artwork, where they follow elevation. Deserts, tropics and ice are painted the same greens and browns as anywhere else at the same height.
 - Glaciers and icefields are painted by elevation like any other land, because the original artwork has nothing to copy for ice.
 - Where the original artwork stops, at 53°N on the British Columbia coast, its tint and the generated tint meet at a faint edge.
 - The generated tiles are look-alikes, not recovered originals. Keep the archive and generated folders separate.

@@ -14,6 +14,28 @@ CACHE = os.environ.get('INTELLISTAR_CACHE') or os.path.join(HERE, 'cache')
 SOURCES = os.path.join(CACHE, 'sources')
 
 
+def countries():
+    """Natural Earth's countries (sources.py): a list of (record, shape)"""
+    import shapefile
+    r = shapefile.Reader(os.path.join(SOURCES, 'countries', 'ne_10m_admin_0_countries.shp'))
+    fields = [f[0] for f in r.fields[1:]]
+    return [(dict(zip(fields, sr.record)), sr.shape) for sr in r.iterShapeRecords()]
+
+
+def find_countries(names, table=None):
+    """Natural Earth's code (ADM0_A3) for each name: a code like FRA, or a name like France or "United Kingdom" """
+    table = table or countries()
+    codes = []
+    for name in names:
+        key = name.strip().upper()
+        hits = [rec['ADM0_A3'] for rec, _ in table
+                if key in (rec['ADM0_A3'], rec['ISO_A3'], rec['ADMIN'].upper(), rec['NAME'].upper(), rec['NAME_LONG'].upper())]
+        if not hits:
+            raise SystemExit(f'no country called {name!r} in Natural Earth (try its three-letter code, like FRA)')
+        codes.append(hits[0])
+    return codes
+
+
 def terrarium(z, x, y):
     """elevation in meters for one 256px web mercator tile (AWS open terrain tiles)"""
     p = os.path.join(CACHE, 'terrarium', str(z), str(x), f'{y}.png')

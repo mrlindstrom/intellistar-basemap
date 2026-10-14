@@ -1,8 +1,13 @@
 # paints IntelliStar-style tiles for an area at zoom 9 into tiles/generated, from OpenStreetMap shorelines and lakes
 # (sources.py) and open elevation data (downloaded as needed into cache/terrarium), colored by model_z9.npz
 #   python generate.py <region> [<region> ...]     regions: see REGIONS, or all
+#   python generate.py --country France [--country Belgium ...]
+#       paints those countries (and the land and sea around them) with the brighter "home" colors the original
+#       uses for the US, and every other country with the darker colors it uses for Canada and Mexico
+#   --home <country>[,<country> ...]     picks the home countries yourself (by default the US and its territories,
+#                                        or the --country ones)
 # run again to resume: areas whose tiles are all there are skipped
-import sys, os, math, time
+import sys, os, math, time, glob, argparse
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import shapefile
@@ -13,18 +18,20 @@ from common import *
 Z = 9
 #each with open ocean around it, so maps centered there aren't cut off
 REGIONS = {
-    # west, south, east, north, lakes folders in cache/sources
-    'alaska': (-180.0, 50.5, -125.0, 72.0, ['ak']),
-    'aleutians': (172.0, 50.5, 180.0, 54.0, ['ak']),  # Alaska west of the 180th meridian
-    'hawaii': (-165.0, 15.5, -150.5, 25.5, ['hi']),
+    # west, south, east, north, lakes shapefiles in cache/sources
+    'alaska': (-180.0, 50.5, -125.0, 72.0, ['ak/gis_osm_water_a_free_1.shp']),
+    'aleutians': (172.0, 50.5, 180.0, 54.0, ['ak/gis_osm_water_a_free_1.shp']),  # Alaska west of the 180th meridian
+    'hawaii': (-165.0, 15.5, -150.5, 25.5, ['hi/gis_osm_water_a_free_1.shp']),
     # the original artwork has these islands but stops just south of them
-    'puerto-rico': (-68.5, 12.5, -63.5, 20.5, ['pr', 'vi']),
-    'guam': (143.0, 11.5, 147.5, 21.0, ['oceania']),  # and the Northern Mariana Islands
-    'american-samoa': (-172.5, -16.0, -167.5, -10.0, ['oceania']),
+    'puerto-rico': (-68.5, 12.5, -63.5, 20.5, ['pr/gis_osm_water_a_free_1.shp', 'vi/gis_osm_water_a_free_1.shp']),
+    'guam': (143.0, 11.5, 147.5, 21.0, ['oceania/gis_osm_water_a_free_1.shp']),  # and the Northern Mariana Islands
+    'american-samoa': (-172.5, -16.0, -167.5, -10.0, ['oceania/gis_osm_water_a_free_1.shp']),
 }
-#land Natural Earth puts in these gets the brighter US colors (the original paints Puerto Rico that way);
-#the rest gets the darker colors the original uses outside the US
+#land Natural Earth puts in the home countries gets the brighter colors the original uses for the US (it paints
+#Puerto Rico that way too); the rest gets the darker colors it uses outside the US
 US = ('USA', 'PRI', 'VIR', 'GUM', 'MNP', 'ASM', 'UMI')
+#how much land and sea a --country area takes in around the country, in degrees
+COUNTRY_MARGIN = 1.5
 CHUNK = 8  # tiles per side painted together (plus a tile of margin all around, for shading and the coastal glow)
 SS = 2  # supersampling for smooth edges
 BIG_LAKE_M2 = 4e8  # lakes this big are painted like the ocean, as the Great Lakes are
@@ -160,22 +167,67 @@ def tile_path(x, y):
     return os.path.join(GENERATED, str(Z), str(x), f'{y}.png')
 
 
-def run(name):
-    west, south, east, north, lake_dirs = REGIONS[name]
+def tile_count(box):
+    west, south, east, north = box[:4]
+    return (min(tx(east - 1e-9), 2 ** Z - 1) - tx(west) + 1) * (ty(south) - ty(north) + 1)
+
+
+def country_areas(codes, table):
+    """areas to paint for these countries: each island or piece of the country with COUNTRY_MARGIN around it,
+    overlapping ones joined, so far-off islands don't drag in a sea of empty ocean (and countries across the 180th
+    meridian come out as a piece each side)"""
+    boxes = []
+    for rec, shape in table:
+        if rec['ADM0_A3'] not in codes:
+            continue
+        parts = list(shape.parts) + [len(shape.points)]
+        for a, b in zip(parts[:-1], parts[1:]):
+            pts = np.asarray(shape.points[a:b])
+            boxes.append([max(-180, pts[:, 0].min() - COUNTRY_MARGIN), max(-80, pts[:, 1].min() - COUNTRY_MARGIN),
+                          min(180, pts[:, 0].max() + COUNTRY_MARGIN), min(84, pts[:, 1].max() + COUNTRY_MARGIN)])
+    joined = True
+    while joined:
+        joined = False
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                a, b = boxes[i], boxes[j]
+                if a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]:
+                    boxes[i] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+                    del boxes[j]
+                    joined = True
+                    break
+            if joined:
+                break
+    return boxes
+
+
+def lake_files(codes):
+    """OpenStreetMap lakes sources.py --country downloaded for these countries, and Natural Earth's for the rest"""
+    files = []
+    for code in codes:
+        files += glob.glob(os.path.join(SOURCES, 'osm', code, '*', 'gis_osm_water_a_free_1.shp'))
+    return files + [os.path.join(SOURCES, 'lakes', 'ne_10m_lakes.shp')]
+
+
+def run(name, box, home):
+    west, south, east, north, lake_paths = box
     tx0, tx1, ty0, ty1 = tx(west), min(tx(east - 1e-9), 2 ** Z - 1), ty(north), ty(south)
     print(f'{name}: z{Z} tiles x {tx0}-{tx1}, y {ty0}-{ty1} ({(tx1 - tx0 + 1) * (ty1 - ty0 + 1)} tiles)')
 
     bbox = [west - 0.5, south - 0.5, east + 0.5, north + 0.5]
     land, _ = load(os.path.join(SOURCES, 'land', 'land_polygons.shp'), bbox)
     lakes = Layer()
-    for d in lake_dirs:
-        part, _ = load(os.path.join(SOURCES, d, 'gis_osm_water_a_free_1.shp'), bbox,
-                       lambda rec: rec['fclass'] in ('water', 'reservoir', 'riverbank'))
+    for path in lake_paths:
+        if not os.path.exists(os.path.join(SOURCES, path)):
+            print(f'  {path}: not downloaded (run sources.py), no lakes from it')
+            continue
+        part, _ = load(os.path.join(SOURCES, path), bbox,
+                       lambda rec: rec.get('fclass', 'water') in ('water', 'reservoir', 'riverbank'))
         lakes.rings += part.rings
         lakes.boxes += [tuple(b) for b in part.boxes]
     lakes.done()
     countries, crec = load(os.path.join(SOURCES, 'countries', 'ne_10m_admin_0_countries.shp'), bbox)
-    foreign = np.array([rec['ADM0_A3'] not in US for rec in crec], bool)
+    foreign = np.array([rec['ADM0_A3'] not in home for rec in crec], bool)
     big = np.array([max((ring_area_m2(r) for r, hole in rings if not hole), default=0) >= BIG_LAKE_M2
                     for rings in lakes.rings], bool)
     print(f'  {big.sum()} lakes big enough to paint like the ocean')
@@ -242,8 +294,23 @@ def run(name):
     print(f'{name}: done')
 
 
-names = list(REGIONS) if sys.argv[1:] == ['all'] else sys.argv[1:]
-if not names or any(n not in REGIONS for n in names):
-    sys.exit('usage: python generate.py <region> [<region> ...]   regions: ' + ', '.join(REGIONS))
-for n in names:
-    run(n)
+parser = argparse.ArgumentParser(description='Paint IntelliStar-style tiles at zoom 9 into ' + GENERATED)
+parser.add_argument('regions', nargs='*', help='built-in regions: ' + ', '.join(REGIONS) + ', or all')
+parser.add_argument('--country', action='append', default=[], help='a country to paint in the home colors, by name or code (FRA); repeat for more')
+parser.add_argument('--home', help='the countries painted in the home colors, separated by commas (default: the US and its territories, or the --country ones)')
+args = parser.parse_args()
+names = list(REGIONS) if args.regions == ['all'] else args.regions
+unknown = [n for n in names if n not in REGIONS]
+if unknown or not (names or args.country):
+    parser.error(f'unknown region {unknown[0]}' if unknown else 'name a region or a --country')
+
+table = countries()
+picked = find_countries(args.country, table)
+home = find_countries(args.home.split(','), table) if args.home else (picked or list(US))
+areas = [(n, REGIONS[n]) for n in names]
+for code in picked:
+    boxes = country_areas([code], table)
+    areas += [(f'{code} {i + 1}/{len(boxes)}', tuple(b) + (lake_files(picked),)) for i, b in enumerate(boxes)]
+print(f'home colors: {", ".join(home)}; {sum(tile_count(a) for _, a in areas):,} zoom {Z} tiles to paint in {len(areas)} areas')
+for name, box in areas:
+    run(name, box, home)

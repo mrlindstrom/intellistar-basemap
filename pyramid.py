@@ -1,12 +1,16 @@
 # builds the other zooms from the generated zoom 9 tiles, then lays the archived artwork over them
-#   python pyramid.py      writes zooms 0-10 to tiles/generated, and the combined set to tiles/merged
-# without tiles/archive, the merged set is the generated tiles alone
-import os, shutil
+#   python pyramid.py                writes zooms 0-10 to tiles/generated, and the combined set to tiles/merged
+#   python pyramid.py --no-archive   leaves the archived artwork out, so tiles/merged is the generated tiles alone
+#                                    (for home colors other than the US: the original paints Canada and Mexico dark)
+# without tiles/archive, the merged set is the generated tiles alone either way
+import os, sys, shutil
 import numpy as np
 from PIL import Image
-from common import ARCHIVE, MERGED, GENERATED as GEN
+from common import MERGED, GENERATED as GEN
+import common
 
 BASE, TOP = 9, 10
+ARCHIVE = os.path.join(common.TILES, 'no-archive') if '--no-archive' in sys.argv[1:] else common.ARCHIVE
 
 
 def tiles(root, z):
